@@ -9,6 +9,12 @@
   :description "Lisp wrapper for gRPC"
   :license "MIT"
   :depends-on (:cl-protobufs :cffi :bordeaux-threads)
+  :properties (:cl-repo (:cffi-libraries ("grpc-client-wrapper")
+                          :provides ("grpc")
+                          :overlays ((:platform (:os "linux" :arch "amd64")
+                                      :native-paths ("lib/linux-amd64/grpc.so"))
+                                     (:platform (:os "darwin" :arch "arm64")
+                                      :native-paths ("lib/darwin-arm64/grpc.dylib")))))
   :serial t
   :in-order-to ((test-op (test-op :grpc/tests)))
   :components ((:file "grpc")

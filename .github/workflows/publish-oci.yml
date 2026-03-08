@@ -1,0 +1,181 @@
+# Parallel build + atomic batch publish of gRPC CL wrapper as an OCI package
+# with platform-specific native library overlays.
+#
+# All platform runners build the native wrapper concurrently, upload
+# artifacts, then a single publish job collects everything and pushes
+# the complete OCI Image Index (universal + all overlays) in one shot.
+name: Publish OCI Package
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  NAMESPACE: ${{ github.repository_owner }}/cl-systems
+
+jobs:
+  # ── Build native wrapper library on each platform ──────────────────
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            lib: grpc.so
+          - os: darwin
+            arch: arm64
+            runner: macos-latest
+            lib: grpc.dylib
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gRPC dev libraries (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config
+          git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/grpc/grpc /tmp/grpc
+          cd /tmp/grpc && mkdir cmake/build && cd cmake/build
+          cmake -DgRPC_INSTALL=ON -DgRPC_BUILD_TESTS=OFF \
+                -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX=/usr/local ../..
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
+
+      - name: Install gRPC dev libraries (macOS)
+        if: matrix.os == 'darwin'
+        run: brew install grpc pkg-config
+
+      - name: Build native wrapper
+        run: make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ matrix.lib }}
+
+  # ── Collect artifacts and publish full OCI package ─────────────────
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: native-artifacts/
+
+      - name: Arrange overlay directories
+        run: |
+          for dir in native-artifacts/native-*; do
+            slug=$(basename "$dir" | sed 's/^native-//')
+            os=$(echo "$slug" | cut -d- -f1)
+            arch=$(echo "$slug" | cut -d- -f2)
+            target="lib/${os}-${arch}"
+            mkdir -p "$target"
+            cp "$dir"/* "$target/"
+          done
+          find lib/ -type f
+
+      - name: Install SBCL
+        run: sudo apt-get update && sudo apt-get install -y sbcl
+
+      - name: Install Quicklisp
+        run: |
+          curl -o /tmp/quicklisp.lisp https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --noinform --non-interactive \
+            --load /tmp/quicklisp.lisp \
+            --eval '(quicklisp-quickstart:install :path #p"~/quicklisp/")'
+          sbcl --noinform --non-interactive \
+            --load ~/quicklisp/setup.lisp \
+            --eval '(ql-util:without-prompting (ql:add-to-init-file))'
+
+      - name: Install oras
+        uses: oras-project/setup-oras@v1
+
+      - name: Pull cl-repository-packager from GHCR
+        run: |
+          CL_REPO_TAG="0.6.5"
+          mkdir -p /tmp/cl-repo-pull ~/.local/share/cl-systems
+          oras pull "ghcr.io/egao1980/cl-systems/cl-repository-packager:${CL_REPO_TAG}" -o /tmp/cl-repo-pull/
+          for f in /tmp/cl-repo-pull/*.tar.gz; do
+            tar -xzf "$f" -C ~/.local/share/cl-systems/
+          done
+          echo "Extracted cl-repository-packager:"
+          ls -la ~/.local/share/cl-systems/
+
+      - name: Build and publish OCI package
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAMESPACE=$(echo "${{ env.NAMESPACE }}" | tr '[:upper:]' '[:lower:]')
+
+          cat > /tmp/publish.lisp <<'LISP'
+          (require :asdf)
+
+          ;; Register cl-repository-packager pulled via oras
+          (asdf:initialize-source-registry
+            '(:source-registry
+              (:tree (:home ".local/share/cl-systems/"))
+              :inherit-configuration))
+
+          ;; Quicklisp for transitive deps
+          (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
+
+          (ql:quickload :cl-repository-packager)
+
+          (let* ((version (uiop:getenv "PKG_VERSION"))
+                 (auth (cl-oci-client/auth:make-auth-config
+                         :username (uiop:getenv "GITHUB_ACTOR")
+                         :password (uiop:getenv "GITHUB_TOKEN")))
+                 (reg (cl-oci-client/registry:make-registry
+                        (format nil "https://~a" (uiop:getenv "OCI_REGISTRY"))
+                        :auth auth))
+                 (spec (make-instance 'cl-repository-packager/build-matrix:package-spec
+                         :name "grpc"
+                         :version version
+                         :source-dir (uiop:getcwd)
+                         :license "MIT"
+                         :description "Common Lisp gRPC client/server library (CFFI wrapper)"
+                         :depends-on '("cl-protobufs" "cffi" "bordeaux-threads")
+                         :provides '("grpc")
+                         :cffi-libraries '("grpc-client-wrapper")
+                         :overlays (list
+                           (make-instance 'cl-repository-packager/build-matrix:overlay-spec
+                             :os "linux" :arch "amd64"
+                             :native-paths '("lib/linux-amd64/grpc.so"))
+                           (make-instance 'cl-repository-packager/build-matrix:overlay-spec
+                             :os "darwin" :arch "arm64"
+                             :native-paths '("lib/darwin-arm64/grpc.dylib")))))
+                 (result (cl-repository-packager/build-matrix:build-package spec)))
+            (cl-repository-packager/publisher:publish-package
+              reg (uiop:getenv "OCI_NAMESPACE") version result spec))
+          LISP
+
+          PKG_VERSION="$VERSION" \
+          GITHUB_ACTOR="${{ github.actor }}" \
+          OCI_REGISTRY="${{ env.REGISTRY }}" \
+          OCI_NAMESPACE="$NAMESPACE" \
+          sbcl --noinform --non-interactive --load /tmp/publish.lisp
+
+      - name: Verify published artifact
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAMESPACE=$(echo "${{ env.NAMESPACE }}" | tr '[:upper:]' '[:lower:]')
+          oras manifest fetch "${REGISTRY}/${NAMESPACE}/grpc:${VERSION}" \
+            --registry-config <(echo "{\"auths\":{\"ghcr.io\":{\"username\":\"${{ github.actor }}\",\"password\":\"${GITHUB_TOKEN}\"}}}")

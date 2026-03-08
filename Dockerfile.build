@@ -1,0 +1,11 @@
+FROM ubuntu:latest AS grpc-builder
+RUN apt-get update && apt-get install -y \
+      build-essential cmake git pkg-config && \
+    git clone --recurse-submodules --depth 1 --shallow-submodules \
+      https://github.com/grpc/grpc /tmp/grpc && \
+    mkdir /tmp/grpc/cmake/build && \
+    cd /tmp/grpc/cmake/build && \
+    cmake -DgRPC_INSTALL=ON -DgRPC_BUILD_TESTS=OFF \
+          -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX=/usr/local ../.. && \
+    make -j"$(nproc)" && make install && ldconfig && \
+    rm -rf /tmp/grpc

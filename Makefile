@@ -10,20 +10,29 @@
 # the same directory you gave as the --prefix option to ./configure
 # when installing it.
 GRPC_ROOT ?= /usr/local
-LIBS = -lgrpc -lgpr
-CXXFLAGS = $(shell pkg-config grpc --cflags) -I$(GRPC_ROOT)/include -fPIC
-LDFLAGS = -L$(GRPC_ROOT)/lib $(LIBS)
+CXXFLAGS = -std=c++17 $(shell pkg-config grpc --cflags) -I$(GRPC_ROOT)/include -fPIC
+LDFLAGS = $(shell pkg-config grpc --libs) -lgpr
 OFILES = client.o client_auth.o server.o
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  LIB = grpc.dylib
+  SOFLAGS = -dynamiclib
+else
+  LIB = grpc.so
+  SOFLAGS = -shared -Wl,--no-undefined
+endif
+
 # Default target if make is run with no arguments.
-default_target: grpc.so
+default_target: $(LIB)
 
-.PHONY : default_target
+.PHONY : default_target clean
 
-grpc.so: ${OFILES}
-	$(CXX)  -pthread -shared -Wl,--no-undefined ${OFILES} -o $@ $(LDFLAGS)
+$(LIB): $(OFILES)
+	$(CXX) -pthread $(SOFLAGS) $(OFILES) -o $@ $(LDFLAGS)
 
-clean: $(RM) ${OFILES} grpc.so
+clean:
+	$(RM) $(OFILES) grpc.so grpc.dylib
 
 client.o: client.cc
 client_auth.o: client_auth.cc

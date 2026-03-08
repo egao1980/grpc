@@ -10,9 +10,11 @@
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (cffi:define-foreign-library grpc-client-wrapper
-	;; Load lib on mac
-	(:darwin #.(namestring (asdf:system-relative-pathname "grpc" "grpc.so")))
-    ;; Load the C wrapper directly from the source directory.
-    (t (:default #.(namestring
-                    (asdf:system-relative-pathname "grpc" "grpc")))))
+    ;; Bare name first: cl-repo installs push native/ into cffi:*foreign-library-directories*
+    ;; Absolute path fallback: development workflow (lib next to .asd file)
+    (:darwin (:or "grpc.dylib"
+                  #.(namestring (asdf:system-relative-pathname "grpc" "grpc.dylib"))))
+    (t (:or (:default "grpc")
+            (:default #.(namestring
+                         (asdf:system-relative-pathname "grpc" "grpc"))))))
   (cffi:load-foreign-library 'grpc-client-wrapper))
