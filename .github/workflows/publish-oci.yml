@@ -107,7 +107,7 @@ jobs:
 
       - name: Pull cl-repository-packager from GHCR
         run: |
-          CL_REPO_TAG="0.6.5"
+          CL_REPO_TAG="0.6.6"
           mkdir -p /tmp/cl-repo-pull ~/.local/share/cl-systems
           oras pull "ghcr.io/egao1980/cl-systems/cl-repository-packager:${CL_REPO_TAG}" -o /tmp/cl-repo-pull/
           for f in /tmp/cl-repo-pull/*.tar.gz; do
@@ -162,7 +162,8 @@ jobs:
                              :native-paths '("lib/darwin-arm64/grpc.dylib")))))
                  (result (cl-repository-packager/build-matrix:build-package spec)))
             (cl-repository-packager/publisher:publish-package
-              reg (uiop:getenv "OCI_NAMESPACE") version result spec))
+              reg (uiop:getenv "OCI_NAMESPACE") version result spec
+              :skip-catalog t))
           LISP
 
           PKG_VERSION="$VERSION" \
