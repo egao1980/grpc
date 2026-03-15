@@ -122,7 +122,7 @@ cat > "${TMPDIR_PULL}/publish.lisp" <<'LISP'
                    :os "darwin" :arch "arm64"
                    :layers (list
                      (list :role "native-library"
-                           :files '(("lib/darwin-arm64/grpc.dylib" . "grpc.dylib")))))))
+                           :files '(("lib/darwin-arm64/grpc.dylib" . "grpc.dylib"))))))))
        (result (cl-repository-packager/build-matrix:build-package spec)))
   (cl-repository-packager/publisher:publish-package
     reg namespace version result spec)

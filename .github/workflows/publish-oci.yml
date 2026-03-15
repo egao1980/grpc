@@ -169,10 +169,11 @@ jobs:
                              :layers (list
                                       (list :role "native-library"
                                             :files '(("lib/darwin-arm64/grpc.dylib"
-                                                      . "grpc.dylib")))))))
+                                                      . "grpc.dylib"))))))))
                  (result (cl-repository-packager/build-matrix:build-package spec)))
             (cl-repository-packager/publisher:publish-package
               reg (uiop:getenv "OCI_NAMESPACE") version result spec))
+          
           LISP
 
           PKG_VERSION="$VERSION" \
