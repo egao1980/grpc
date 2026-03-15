@@ -107,9 +107,10 @@ jobs:
 
       - name: Pull cl-repository-packager from GHCR
         run: |
-          CL_REPO_TAG="0.6.6"
+          CL_REPO_TAG="latest"
           mkdir -p /tmp/cl-repo-pull ~/.local/share/cl-systems
-          oras pull "ghcr.io/egao1980/cl-systems/cl-repository-packager:${CL_REPO_TAG}" -o /tmp/cl-repo-pull/
+          rm -rf ~/.local/share/cl-systems/cl-oci-*
+          oras pull "ghcr.io/egao1980/cl-repository/cl-repository-packager:${CL_REPO_TAG}" -o /tmp/cl-repo-pull/
           for f in /tmp/cl-repo-pull/*.tar.gz; do
             tar -xzf "$f" -C ~/.local/share/cl-systems/
           done
@@ -156,14 +157,19 @@ jobs:
                          :overlays (list
                            (make-instance 'cl-repository-packager/build-matrix:overlay-spec
                              :os "linux" :arch "amd64"
-                             :native-paths '("lib/linux-amd64/grpc.so"))
+                             :layers (list
+                                      (list :role "native-library"
+                                            :files '(("lib/linux-amd64/grpc.so"
+                                                      . "grpc.so")))))
                            (make-instance 'cl-repository-packager/build-matrix:overlay-spec
                              :os "darwin" :arch "arm64"
-                             :native-paths '("lib/darwin-arm64/grpc.dylib")))))
+                             :layers (list
+                                      (list :role "native-library"
+                                            :files '(("lib/darwin-arm64/grpc.dylib"
+                                                      . "grpc.dylib")))))))
                  (result (cl-repository-packager/build-matrix:build-package spec)))
             (cl-repository-packager/publisher:publish-package
-              reg (uiop:getenv "OCI_NAMESPACE") version result spec
-              :skip-catalog t))
+              reg (uiop:getenv "OCI_NAMESPACE") version result spec))
           LISP
 
           PKG_VERSION="$VERSION" \

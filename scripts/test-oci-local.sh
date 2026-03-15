@@ -68,10 +68,11 @@ docker run -d -p 5050:5000 --name "$CONTAINER_NAME" registry:2
 sleep 1
 
 # ── Pull cl-repository-packager ──────────────────────────────────────
-CL_REPO_TAG="0.6.6"
+CL_REPO_TAG="latest"
 echo "==> Pulling cl-repository-packager:${CL_REPO_TAG} from GHCR"
 mkdir -p "$CL_SYSTEMS_DIR"
-oras pull "ghcr.io/egao1980/cl-systems/cl-repository-packager:${CL_REPO_TAG}" -o "$TMPDIR_PULL/"
+rm -rf "$CL_SYSTEMS_DIR"/cl-oci-*
+oras pull "ghcr.io/egao1980/cl-repository/cl-repository-packager:${CL_REPO_TAG}" -o "$TMPDIR_PULL/"
 for f in "$TMPDIR_PULL"/*.tar.gz; do
   [ -f "$f" ] && tar -xzf "$f" -C "$CL_SYSTEMS_DIR/"
 done
@@ -110,13 +111,17 @@ cat > "${TMPDIR_PULL}/publish.lisp" <<'LISP'
                :overlays (list
                  (make-instance 'cl-repository-packager/build-matrix:overlay-spec
                    :os "linux" :arch "amd64"
-                   :native-paths '("lib/linux-amd64/grpc.so"))
+                   :layers (list
+                     (list :role "native-library"
+                           :files '(("lib/linux-amd64/grpc.so" . "grpc.so")))))
                  (make-instance 'cl-repository-packager/build-matrix:overlay-spec
                    :os "darwin" :arch "arm64"
-                   :native-paths '("lib/darwin-arm64/grpc.dylib")))))
+                   :layers (list
+                     (list :role "native-library"
+                           :files '(("lib/darwin-arm64/grpc.dylib" . "grpc.dylib")))))))
        (result (cl-repository-packager/build-matrix:build-package spec)))
   (cl-repository-packager/publisher:publish-package
-    reg namespace version result spec :skip-catalog t)
+    reg namespace version result spec)
   (format t "~%Published grpc:~a to ~a/~a~%" version registry-url namespace))
 LISP
 

@@ -12,9 +12,13 @@
   :properties (:cl-repo (:cffi-libraries ("grpc-client-wrapper")
                           :provides ("grpc")
                           :overlays ((:platform (:os "linux" :arch "amd64")
-                                      :native-paths ("lib/linux-amd64/grpc.so"))
+                                      :layers ((:role "native-library"
+                                                :files (("lib/linux-amd64/grpc.so"
+                                                         . "grpc.so")))))
                                      (:platform (:os "darwin" :arch "arm64")
-                                      :native-paths ("lib/darwin-arm64/grpc.dylib")))))
+                                      :layers ((:role "native-library"
+                                                :files (("lib/darwin-arm64/grpc.dylib"
+                                                         . "grpc.dylib"))))))))
   :serial t
   :in-order-to ((test-op (test-op :grpc/tests)))
   :components ((:file "grpc")
