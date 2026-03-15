@@ -68,27 +68,14 @@ docker run -d -p 5050:5000 --name "$CONTAINER_NAME" registry:2
 sleep 1
 
 # ── Pull cl-repository-packager ──────────────────────────────────────
-CL_REPO_TAG="latest"
+CL_REPO_TAG="0.8.0"
 CL_REPO_IMAGE="ghcr.io/egao1980/cl-repository/cl-repository-packager"
 echo "==> Pulling cl-repository-packager:${CL_REPO_TAG} from GHCR"
 rm -rf "$TMPDIR_PULL"
 mkdir -p "$TMPDIR_PULL"
 mkdir -p "$CL_SYSTEMS_DIR"
 rm -rf "$CL_SYSTEMS_DIR"/cl-oci-*
-
-oras pull "${CL_REPO_IMAGE}:${CL_REPO_TAG}" -o "$TMPDIR_PULL/" || true
-if ! rg --files "$TMPDIR_PULL" | rg -q '\.tar\.gz$'; then
-  echo "No tar layers for tag '${CL_REPO_TAG}', resolving latest semver tag..."
-  CL_REPO_TAG="$(oras repo tags "${CL_REPO_IMAGE}" | rg '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
-  if [ -z "$CL_REPO_TAG" ]; then
-    echo "ERROR: Could not resolve a versioned cl-repository-packager tag." >&2
-    exit 1
-  fi
-  echo "Using fallback tag: ${CL_REPO_TAG}"
-  rm -rf "$TMPDIR_PULL"
-  mkdir -p "$TMPDIR_PULL"
-  oras pull "${CL_REPO_IMAGE}:${CL_REPO_TAG}" -o "$TMPDIR_PULL/"
-fi
+oras pull "${CL_REPO_IMAGE}:${CL_REPO_TAG}" -o "$TMPDIR_PULL/"
 
 for f in "$TMPDIR_PULL"/*.tar.gz; do
   [ -f "$f" ] && tar -xzf "$f" -C "$CL_SYSTEMS_DIR/"

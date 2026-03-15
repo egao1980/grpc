@@ -107,25 +107,12 @@ jobs:
 
       - name: Pull cl-repository-packager from GHCR
         run: |
-          CL_REPO_TAG="latest"
+          CL_REPO_TAG="0.8.0"
           CL_REPO_IMAGE="ghcr.io/egao1980/cl-repository/cl-repository-packager"
           rm -rf /tmp/cl-repo-pull
           mkdir -p /tmp/cl-repo-pull ~/.local/share/cl-systems
           rm -rf ~/.local/share/cl-systems/cl-oci-*
-
-          oras pull "${CL_REPO_IMAGE}:${CL_REPO_TAG}" -o /tmp/cl-repo-pull/ || true
-          if ! rg --files /tmp/cl-repo-pull | rg -q '\.tar\.gz$'; then
-            echo "No tar layers for tag '${CL_REPO_TAG}', resolving latest semver tag..."
-            CL_REPO_TAG="$(oras repo tags "${CL_REPO_IMAGE}" | rg '^[0-9]+\\.[0-9]+\\.[0-9]+$' | sort -V | tail -n 1)"
-            if [ -z "${CL_REPO_TAG}" ]; then
-              echo "ERROR: Could not resolve a versioned cl-repository-packager tag." >&2
-              exit 1
-            fi
-            echo "Using fallback tag: ${CL_REPO_TAG}"
-            rm -rf /tmp/cl-repo-pull
-            mkdir -p /tmp/cl-repo-pull
-            oras pull "${CL_REPO_IMAGE}:${CL_REPO_TAG}" -o /tmp/cl-repo-pull/
-          fi
+          oras pull "${CL_REPO_IMAGE}:${CL_REPO_TAG}" -o /tmp/cl-repo-pull/
 
           for f in /tmp/cl-repo-pull/*.tar.gz; do
             tar -xzf "$f" -C ~/.local/share/cl-systems/
