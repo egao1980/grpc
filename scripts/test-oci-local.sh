@@ -83,6 +83,19 @@ done
 echo "Extracted to ${CL_SYSTEMS_DIR}:"
 ls "$CL_SYSTEMS_DIR/"
 
+# ── Pull cl-protobufs from local registry ─────────────────────────────
+CL_PB_VERSION="${CL_PROTOBUFS_VERSION:-2.0}"
+echo "==> Pulling cl-protobufs:${CL_PB_VERSION} from local registry"
+CL_PB_DIR="${CL_SYSTEMS_DIR}/cl-protobufs"
+rm -rf "$CL_PB_DIR"
+mkdir -p "$CL_PB_DIR"
+oras pull --insecure "${REGISTRY}/${NAMESPACE}/cl-protobufs:${CL_PB_VERSION}" -o "${TMPDIR_PULL}/cl-protobufs/"
+for f in "${TMPDIR_PULL}/cl-protobufs/"*.tar.gz; do
+  [ -f "$f" ] && tar -xzf "$f" -C "$CL_PB_DIR/"
+done
+echo "    cl-protobufs installed to ${CL_PB_DIR}:"
+ls "$CL_PB_DIR/"
+
 # ── Publish OCI package ──────────────────────────────────────────────
 echo "==> Publishing OCI package to ${REGISTRY}/${NAMESPACE}/grpc:${VERSION}"
 cat > "${TMPDIR_PULL}/publish.lisp" <<'LISP'

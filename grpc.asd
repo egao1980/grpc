@@ -15,6 +15,10 @@
                                       :layers ((:role "native-library"
                                                 :files (("lib/linux-amd64/grpc.so"
                                                          . "grpc.so")))))
+                                     (:platform (:os "linux" :arch "arm64")
+                                      :layers ((:role "native-library"
+                                                :files (("lib/linux-arm64/grpc.so"
+                                                         . "grpc.so")))))
                                      (:platform (:os "darwin" :arch "arm64")
                                       :layers ((:role "native-library"
                                                 :files (("lib/darwin-arm64/grpc.dylib"
