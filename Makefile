@@ -17,10 +17,12 @@ OFILES = client.o client_auth.o server.o
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
   LIB = grpc.dylib
-  SOFLAGS = -dynamiclib
+  # Bundle copies libgrpc*.dylib next to grpc.dylib; @loader_path finds them.
+  SOFLAGS = -dynamiclib -Wl,-rpath,@loader_path
 else
   LIB = grpc.so
-  SOFLAGS = -shared -Wl,--no-undefined
+  # Bundle copies libgrpc*.so next to grpc.so; $ORIGIN finds them at dlopen time.
+  SOFLAGS = -shared -Wl,--no-undefined -Wl,-rpath,\$$ORIGIN
 endif
 
 # Default target if make is run with no arguments.
