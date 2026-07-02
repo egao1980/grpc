@@ -98,25 +98,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Stage overlays OUTSIDE the checkout: build-package tars the whole
+      # source-dir into the source layer, so anything staged inside the repo
+      # would be swept into every published source tarball.
       - name: Download all native artifacts
         uses: actions/download-artifact@v4
         with:
-          path: native-artifacts/
+          path: ${{ runner.temp }}/native-artifacts/
 
       - name: Arrange overlay directories
         run: |
-          for dir in native-artifacts/native-*; do
+          OVERLAY_ROOT="${RUNNER_TEMP}/overlays"
+          echo "OVERLAY_ROOT=${OVERLAY_ROOT}" >> "$GITHUB_ENV"
+          for dir in "${RUNNER_TEMP}"/native-artifacts/native-*; do
             [ -d "$dir" ] || continue
             slug=$(basename "$dir" | sed 's/^native-//')
             os=$(echo "$slug" | cut -d- -f1)
             arch=$(echo "$slug" | cut -d- -f2)
-            target="lib/${os}-${arch}"
+            target="${OVERLAY_ROOT}/lib/${os}-${arch}"
             mkdir -p "$target"
             cp "$dir"/* "$target/"
             echo "${os}/${arch}" >> /tmp/platforms.txt
           done
           echo "Platforms:"; cat /tmp/platforms.txt
-          find lib/ -type f
+          find "${OVERLAY_ROOT}" -type f
 
       - name: Install SBCL
         run: sudo apt-get update && sudo apt-get install -y sbcl
@@ -197,7 +202,8 @@ jobs:
                                 (prefix (format nil "~a-~a" os arch))
                                 (lib-dir (uiop:ensure-directory-pathname
                                           (merge-pathnames (format nil "lib/~a/" prefix)
-                                                           (uiop:getcwd))))
+                                                           (uiop:ensure-directory-pathname
+                                                            (uiop:getenv "OVERLAY_ROOT")))))
                                 ;; NOTE: (directory #p"*") would skip files with
                                 ;; extensions (grpc.so!) on SBCL; uiop:directory-files gets all.
                                 (native-files
