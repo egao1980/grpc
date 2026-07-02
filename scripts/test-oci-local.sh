@@ -19,7 +19,7 @@ cleanup() {
   echo "==> Cleanup"
   docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
   rm -rf "$TMPDIR_PULL"
-  rm -rf "${PROJECT_DIR}/lib"
+  rm -rf "${PROJECT_DIR:?}/lib"
 }
 trap cleanup EXIT
 

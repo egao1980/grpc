@@ -9,6 +9,10 @@
   :description "Lisp wrapper for gRPC"
   :license "MIT"
   :depends-on (:cl-protobufs :cffi :bordeaux-threads)
+  ;; NOTE: minimal overlay spec for local package-op builds.  The CI publish
+  ;; pipeline (.github/workflows/publish-oci.yml) builds the authoritative
+  ;; overlays dynamically -- native/ additionally carries the gRPC runtime
+  ;; libraries bundled next to grpc.so by scripts/bundle-grpc-native-deps.sh.
   :properties (:cl-repo (:cffi-libraries ("grpc-client-wrapper")
                           :provides ("grpc")
                           :overlays ((:platform (:os "linux" :arch "amd64")

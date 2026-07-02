@@ -31,7 +31,7 @@ jobs:
             lib: grpc.so
           - os: linux
             arch: arm64
-            runner: ubuntu-24.04-arm64
+            runner: ubuntu-24.04-arm
             lib: grpc.so
           - os: darwin
             arch: arm64
@@ -66,7 +66,7 @@ jobs:
       - name: Install gRPC dev libraries (Linux)
         if: matrix.os == 'linux'
         run: |
-          sudo apt-get update && sudo apt-get install -y build-essential pkg-config
+          sudo apt-get update && sudo apt-get install -y build-essential pkg-config patchelf
           brew install grpc
 
       - name: Install gRPC dev libraries (macOS)
@@ -198,10 +198,13 @@ jobs:
                                 (lib-dir (uiop:ensure-directory-pathname
                                           (merge-pathnames (format nil "lib/~a/" prefix)
                                                            (uiop:getcwd))))
+                                ;; NOTE: (directory #p"*") would skip files with
+                                ;; extensions (grpc.so!) on SBCL; uiop:directory-files gets all.
                                 (native-files
-                                  (loop for p in (directory (merge-pathnames #p"*" lib-dir))
-                                        unless (uiop:directory-pathname-p p)
+                                  (loop for p in (uiop:directory-files lib-dir)
                                         collect (cons (namestring p) (file-namestring p)))))
+                           (unless native-files
+                             (error "No native files found under ~a" lib-dir))
                            (make-instance 'cl-repository-packager/build-matrix:overlay-spec
                              :os os :arch arch
                              :layers
