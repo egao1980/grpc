@@ -14,12 +14,15 @@ VERSION="${1:-0.9}"
 CONTAINER_NAME="cl-oci-test-registry"
 CL_SYSTEMS_DIR="${HOME}/.local/share/cl-systems"
 TMPDIR_PULL="$(mktemp -d)"
+# Stage overlays OUTSIDE the checkout: build-package tars the whole source
+# dir into the source layer, so lib/ staged in the repo would be swept into
+# the published source tarball. /tmp is docker-shareable.
+OVERLAY_ROOT="$(mktemp -d /tmp/grpc-overlays.XXXXXX)"
 
 cleanup() {
   echo "==> Cleanup"
   docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-  rm -rf "$TMPDIR_PULL"
-  rm -rf "${PROJECT_DIR}/lib"
+  rm -rf "$TMPDIR_PULL" "$OVERLAY_ROOT"
 }
 trap cleanup EXIT
 
@@ -36,8 +39,10 @@ done
 echo "==> Building grpc.dylib (darwin/arm64)"
 make -C "$PROJECT_DIR" clean
 make -C "$PROJECT_DIR" -j"$(sysctl -n hw.ncpu)"
-mkdir -p "${PROJECT_DIR}/lib/darwin-arm64"
-cp "${PROJECT_DIR}/grpc.dylib" "${PROJECT_DIR}/lib/darwin-arm64/"
+mkdir -p "${OVERLAY_ROOT}/lib/darwin-arm64"
+"${PROJECT_DIR}/scripts/bundle-grpc-native-deps.sh" \
+  "${PROJECT_DIR}/grpc.dylib" "${OVERLAY_ROOT}/lib/darwin-arm64" > /tmp/grpc-bundle.log 2>&1 \
+  || { tail -20 /tmp/grpc-bundle.log; exit 1; }
 
 # ── Build linux via Docker (native arch for speed) ───────────────────
 # Uses native Docker platform (arm64 on Apple Silicon) for fast builds.
@@ -50,16 +55,21 @@ if ! docker image inspect "$BUILD_IMAGE" &>/dev/null; then
 fi
 
 echo "==> Building grpc.so (linux) via Docker"
+# The builder image installs gRPC into /usr/local (not brew), so there is
+# nothing to bundle here -- a bare grpc.so is fine for the local pipeline
+# test. CI builds against linuxbrew and bundles the runtime libs.
 docker run --rm \
   -v "${PROJECT_DIR}:/src" \
   -w /src \
   "$BUILD_IMAGE" \
   bash -c 'make clean && make -j$(nproc)'
-mkdir -p "${PROJECT_DIR}/lib/linux-amd64"
-cp "${PROJECT_DIR}/grpc.so" "${PROJECT_DIR}/lib/linux-amd64/"
+mkdir -p "${OVERLAY_ROOT}/lib/linux-amd64"
+cp "${PROJECT_DIR}/grpc.so" "${OVERLAY_ROOT}/lib/linux-amd64/"
+# Build artifacts must not leak into the source layer at publish time.
+make -C "$PROJECT_DIR" clean
 
 echo "==> Built artifacts:"
-find "${PROJECT_DIR}/lib" -type f
+find "${OVERLAY_ROOT}/lib" -type f
 
 # ── Start local OCI registry ─────────────────────────────────────────
 echo "==> Starting local OCI registry on ${REGISTRY}"
@@ -115,6 +125,7 @@ cat > "${TMPDIR_PULL}/publish.lisp" <<'LISP'
        (registry-url (uiop:getenv "OCI_REGISTRY"))
        (namespace (uiop:getenv "OCI_NAMESPACE"))
        (source-dir (uiop:getenv "SOURCE_DIR"))
+       (overlay-root (uiop:ensure-directory-pathname (uiop:getenv "OVERLAY_ROOT")))
        (reg (cl-oci-client/registry:make-registry registry-url))
        (spec (make-instance 'cl-repository-packager/build-matrix:package-spec
                :name "grpc"
@@ -125,17 +136,24 @@ cat > "${TMPDIR_PULL}/publish.lisp" <<'LISP'
                :depends-on '("cl-protobufs" "cffi" "bordeaux-threads")
                :provides '("grpc")
                :cffi-libraries '("grpc-client-wrapper")
-               :overlays (list
-                 (make-instance 'cl-repository-packager/build-matrix:overlay-spec
-                   :os "linux" :arch "amd64"
-                   :layers (list
-                     (list :role "native-library"
-                           :files '(("lib/linux-amd64/grpc.so" . "grpc.so")))))
-                 (make-instance 'cl-repository-packager/build-matrix:overlay-spec
-                   :os "darwin" :arch "arm64"
-                   :layers (list
-                     (list :role "native-library"
-                           :files '(("lib/darwin-arm64/grpc.dylib" . "grpc.dylib"))))))))
+               :overlays
+               (flet ((make-overlay (os arch)
+                        (let* ((lib-dir (merge-pathnames
+                                         (format nil "lib/~a-~a/" os arch) overlay-root))
+                               ;; grpc.so/.dylib + any bundled runtime libs.
+                               ;; NOTE: (directory #p"*") skips files with extensions
+                               ;; on SBCL; uiop:directory-files gets all of them.
+                               (native-files
+                                 (loop for p in (uiop:directory-files lib-dir)
+                                       collect (cons (namestring p) (file-namestring p)))))
+                          (unless native-files
+                            (error "No native files found under ~a" lib-dir))
+                          (make-instance 'cl-repository-packager/build-matrix:overlay-spec
+                            :os os :arch arch
+                            :layers (list (list :role "native-library"
+                                                :files native-files))))))
+                 (list (make-overlay "linux" "amd64")
+                       (make-overlay "darwin" "arm64")))))
        (result (cl-repository-packager/build-matrix:build-package spec)))
   (cl-repository-packager/publisher:publish-package
     reg namespace version result spec)
@@ -146,6 +164,7 @@ PKG_VERSION="$VERSION" \
 OCI_REGISTRY="http://${REGISTRY}" \
 OCI_NAMESPACE="$NAMESPACE" \
 SOURCE_DIR="${PROJECT_DIR}/" \
+OVERLAY_ROOT="${OVERLAY_ROOT}/" \
 sbcl --noinform --non-interactive --load "${TMPDIR_PULL}/publish.lisp"
 
 # ── Verify ────────────────────────────────────────────────────────────

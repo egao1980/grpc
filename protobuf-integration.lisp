@@ -21,6 +21,7 @@
 ;;; Tell the cl-protobufs method-call stubs who's in charge of RPC.
 (setq cl-protobufs:*rpc-call-function* 'start-call)
 (setq cl-protobufs:*rpc-streaming-client-function* 'handle-client-stream-call)
+(setq cl-protobufs:*rpc-streaming-server-function* 'handle-server-stream-call)
 
 (defun get-qualified-method-name (method)
   "Get the qualified METHOD name /service-name/method-name for a method
@@ -35,7 +36,7 @@ given a cl-protobufs method-descriptor."
                  (position #\. (proto:proto-qualified-name method) :from-end t))))
     (concatenate 'string "/" package-name "." service-name "/" rpc-name)))
 
-(defgeneric start-call (channel method request response &key callback)
+(defgeneric start-call (channel method request response &key callback timeout metadata)
   (:documentation
    "Starts a gRPC call for METHOD.
 
@@ -44,9 +45,11 @@ Parameters:
     METHOD is the cl-protobuf method we wish to call.
     REQUEST is the proto message to send.
     RESPONSE is not supported.
-    CALLBACK is not currently supported."))
+    CALLBACK is not currently supported.
+    TIMEOUT is the timeout for the call in seconds.
+    METADATA is the metadata to send with the call."))
 
-(defmethod start-call (channel method request response &key callback)
+(defmethod start-call (channel method request response &key callback (timeout -1) metadata)
   (assert (not (or callback response)) nil "CALLBACK and RESPONSE args not supported.")
   (let* ((qualified-method-name (get-qualified-method-name method))
          (output-type (proto:proto-output-type method))
@@ -55,7 +58,9 @@ Parameters:
          (bytes (if client-stream
                     (mapcar #'proto:serialize-to-bytes request)
                     (proto:serialize-to-bytes request)))
+         (context (make-context :metadata metadata :deadline (or timeout -1)))
          (response (grpc-call channel qualified-method-name bytes
+                              context
                               server-stream client-stream)))
     (flet ((deserialize-result (bytes)
              (proto:deserialize-from-bytes
@@ -65,81 +70,173 @@ Parameters:
           (mapcar #'deserialize-result response)
           (deserialize-result response)))))
 
-(defstruct (proto-call (:include call))
-  (output-type nil :type symbol)
-  (client-stream-closed-p nil :type boolean)
-  (call-cleaned-up-p nil :type boolean)
-  (client-stream-p nil :type boolean)
-  (server-stream-p nil :type boolean)
-  (initial-message-sent-p nil :type boolean))
+(defstruct (client-proto-call (:include call)))
+(defstruct (server-proto-call (:include call)))
 
-(defgeneric handle-client-stream-call (type &key channel method request call)
+(define-condition grpc-server-abort (error)
+  ((status-code :initarg :status-code
+                :initform :grpc-status-unknown
+                :accessor abort-status-code)
+   (status-message :initarg :status-message
+                   :initform ""
+                   :accessor abort-status-message))
+  (:report (lambda (condition stream)
+             (format stream "gRPC Server Abort: ~A (~A)"
+                     (abort-status-message condition)
+                     (abort-status-code condition)))))
+
+(defun abort-server-stream (status-code &optional (status-message ""))
+  "Aborts a server streaming call with STATUS-CODE and STATUS-MESSAGE."
+  (error 'grpc-server-abort :status-code status-code :status-message status-message))
+
+(defgeneric stream-send (call message)
+  (:documentation "Sends a Protobuf message over a streaming CALL (client or server)."))
+
+(defmethod stream-send ((call server-proto-call) message)
+  (when (call-server-send-status-p call)
+    (error 'proto-call-error :call-error "Tried to send message after server finished."))
+  (unless (call-server-stream-p call)
+    (error 'proto-call-error
+           :call-error "Tried to send multiple messages from a non-streaming server."))
+  (send-message call (proto:serialize-to-bytes message)))
+
+(defmethod stream-send ((call client-proto-call) message)
+  (when (call-client-stream-closed-p call)
+    (error 'proto-call-error :call-error "Tried to send message on closed stream"))
+  (when (call-call-cleaned-up-p call)
+    (error 'proto-call-error :call-error "Tried to send message with call cleaned up."))
+  (when (and (not (call-client-stream-p call))
+             (call-initial-message-sent-p call))
+    (error 'proto-call-error
+           :call-error "Tried to send multiple messages from a non-streaming client."))
+  (setf (call-initial-message-sent-p call) t)
+  (send-message call (proto:serialize-to-bytes message)))
+
+(defgeneric stream-receive (call)
+  (:documentation "Receives a Protobuf message from a streaming CALL (client or server)."))
+
+(defmethod stream-receive ((call server-proto-call))
+  (when (call-server-send-status-p call)
+    (error 'proto-call-error :call-error "Tried to receive message after server finished."))
+  (unless (call-client-stream-p call)
+    (error 'proto-call-error
+           :call-error "Tried to receive multiple messages from a non-streaming client."))
+  (let ((messages (receive-message call)))
+    (when messages
+      (proto:deserialize-from-bytes
+       (call-input-type call)
+       (apply #'concatenate 'proto:byte-vector messages)))))
+
+(defmethod stream-receive ((call client-proto-call))
+  (when (call-call-cleaned-up-p call)
+    (error 'proto-call-error
+           :call-error "Tried to receive message with call cleaned up."))
+  (unless (call-initial-message-sent-p call)
+    (error 'proto-call-error
+           :call-error "Tried to receive message before sending a message."))
+  (let ((messages (receive-message call)))
+    (if messages
+        (proto:deserialize-from-bytes
+         (call-output-type call)
+         (apply #'concatenate 'proto:byte-vector messages))
+        (progn
+          (check-server-status call)
+          nil))))
+
+(defgeneric stream-close (call)
+  (:documentation "Half-closes a streaming CALL (client or server)."))
+
+(defmethod stream-close ((call server-proto-call))
+  (setf (call-client-stream-closed-p call) t)
+  (server-recv-close call))
+
+(defmethod stream-close ((call client-proto-call))
+  (setf (call-client-stream-closed-p call) t)
+  (client-close call))
+
+(defgeneric stream-cleanup (call)
+  (:documentation "Cleans up a client streaming CALL."))
+
+(defmethod stream-cleanup ((call client-proto-call))
+  (unless (call-client-stream-closed-p call)
+    (error 'proto-call-error
+           :call-error "Tried to cleanup call before closing the call."))
+  (free-call-data call))
+
+(defmacro do-stream-receive ((message-var call) &body body)
+  "Repeatedly receives messages from CALL and binds them to MESSAGE-VAR until EOF (nil)."
+  (let ((call-var (gensym "CALL")))
+    `(let ((,call-var ,call))
+       (loop for ,message-var = (stream-receive ,call-var)
+             while ,message-var
+             do (progn ,@body)))))
+
+(defgeneric handle-client-stream-call (type &key channel method request call timeout metadata)
   (:documentation
-   "Dispatch for different stream call types.
+   "Dispatch for different stream call types."))
 
-Parameters:
-    TYPE is the type of call this should be..
-    CHANNEL is the channel to send a call over.
-    METHOD is the cl-protobuf method-descriptor for the method we wish to call.
-    REQUEST is the proto message to send.
-    CALL contains a proto-call object."))
-
-(defmethod handle-client-stream-call ((type (eql :start)) &key channel method request call)
-  "Start a gRPC call over a CHANNEL to a specific rpc METHOD.
-Ignores TYPE REQUEST and CALL."
+(defmethod handle-client-stream-call ((type (eql :start))
+                                      &key channel method request call (timeout -1)
+                                      metadata)
   (declare (ignore type request call))
   (let* ((qualified-method-name (get-qualified-method-name method))
-         (call (start-grpc-call channel qualified-method-name)))
-    (make-proto-call
+         (context (make-context :metadata metadata :deadline timeout))
+         (call (start-grpc-call channel qualified-method-name context)))
+    (make-client-proto-call
      :c-call (call-c-call call)
      :c-tag (call-c-tag call)
      :c-ops (call-c-ops call)
      :ops-plist (call-ops-plist call)
      :server-stream-p (proto:proto-output-streaming-p method)
      :client-stream-p (proto:proto-input-streaming-p method)
-     :output-type (proto:proto-output-type method))))
+     :input-type (proto:proto-input-type method)
+     :output-type (proto:proto-output-type method)
+     :is-server-call nil)))
 
-(defmethod handle-client-stream-call ((type (eql :send)) &key channel method request call)
-  "Send a REQUEST over a CALL.
-Ignores TYPE CHANNEL and METHOD."
-  (declare (ignore type channel method))
-  (when (proto-call-client-stream-closed-p call)
-    (error 'proto-call-error :call-error "Tried to send message on closed stream"))
-  (when (proto-call-call-cleaned-up-p call)
-    (error 'proto-call-error :call-error "Tried to send message with call cleaned up."))
-  (when (and (not (proto-call-client-stream-p call))
-             (proto-call-initial-message-sent-p call))
-    (error 'proto-call-error :call-error
-           "Tried to send multiple messages from a non-streaming client."))
-  (setf (proto-call-initial-message-sent-p call) t)
-  (send-message call (proto:serialize-to-bytes request)))
+(defmethod handle-client-stream-call ((type (eql :send))
+                                      &key channel method request call timeout metadata)
+  (declare (ignore type channel method timeout metadata))
+  (stream-send call request))
 
-(defmethod handle-client-stream-call ((type (eql :receive)) &key channel method request call)
-  "Receive a message from a CHANNEL.
-Ignores TYPE CHANNEL METHOD and REQUEST."
-  (declare (ignore type channel method request))
-  (when (proto-call-call-cleaned-up-p call)
-    (error 'proto-call-error :call-error "Tried to received message with call cleaned up."))
-  (unless (proto-call-initial-message-sent-p call)
-    (error 'proto-call-error :call-error "Tried to received message before sending a message."))
-  (proto:deserialize-from-bytes
-   (proto-call-output-type call)
-   (apply #'concatenate 'proto:byte-vector (receive-message call))))
+(defmethod handle-client-stream-call ((type (eql :receive))
+                                      &key channel method request call timeout metadata)
+  (declare (ignore type channel method request timeout metadata))
+  (stream-receive call))
 
-(defmethod handle-client-stream-call ((type (eql :close)) &key channel method request call)
-  "Close a CALL from the client-side. Server side remains open.
-Ignores TYPE CHANNEL METHOD and REQUEST."
-  (declare (ignore type channel method request))
-  (setf (proto-call-client-stream-closed-p call) t)
-  (client-close call))
+(defmethod handle-client-stream-call ((type (eql :close))
+                                      &key channel method request call timeout metadata)
+  (declare (ignore type channel method request timeout metadata))
+  (stream-close call))
 
-(defmethod handle-client-stream-call ((type (eql :cleanup)) &key channel method request call)
-  "Cleanup the CALL data stored in a proto-call structure.
-Ignores TYPE CHANNEL METHOD and REQUEST."
-  (declare (ignore type channel method request))
-  (unless (proto-call-client-stream-closed-p call)
-    (error 'proto-call-error :call-error "Tried to cleanup call before closing the call."))
-  (free-call-data call))
+(defmethod handle-client-stream-call ((type (eql :cleanup))
+                                      &key channel method request call timeout metadata)
+  (declare (ignore type channel method request timeout metadata))
+  (stream-cleanup call))
+
+(defgeneric handle-server-stream-call (type &key channel method request call timeout metadata)
+  (:documentation
+   "Dispatch for different server stream call types."))
+
+(defmethod handle-server-stream-call ((type (eql :receive))
+                                      &key channel method request call timeout metadata)
+  (declare (ignore type channel method request timeout metadata))
+  (stream-receive call))
+
+(defmethod handle-server-stream-call ((type (eql :send))
+                                      &key channel method request call timeout metadata)
+  (declare (ignore type channel method timeout metadata))
+  (stream-send call request))
+
+(defmethod handle-server-stream-call ((type (eql :receive-close))
+                                      &key channel method request call timeout metadata)
+  (declare (ignore type channel method request timeout metadata))
+  (stream-close call))
+
+(defmethod handle-server-stream-call ((type (eql :send-status))
+                                      &key channel method request call timeout metadata )
+  (declare (ignore type channel method request timeout metadata))
+  (setf (call-server-send-status-p call) t)
+  (server-send-status call))
 
 (defun run-grpc-proto-server (address service-name
                               &key
@@ -160,22 +257,54 @@ Parameters
   (let* ((service (proto:find-service-descriptor service-name))
          method-details-list)
     (dolist (method (proto:proto-methods service))
-      (push
-       (make-method-details
-        :name (get-qualified-method-name method)
-        :serializer #'proto:serialize-to-bytes
-        :deserializer (lambda (bytes)
-                        (proto:deserialize-from-bytes
-                         (proto:proto-input-type method)
-                         bytes))
-        :action (lambda (message call)
-                  (funcall (proto:proto-server-stub method)
-                           message call)))
-       method-details-list))
+      (let ((istream-p (proto:proto-input-streaming-p method))
+            (ostream-p (proto:proto-output-streaming-p method)))
+        (push
+         (make-method-details
+          :name (get-qualified-method-name method)
+          :serializer #'proto:serialize-to-bytes
+          :deserializer (lambda (bytes)
+                          (proto:deserialize-from-bytes
+                           (proto:proto-input-type method)
+                           bytes))
+          :action
+          (if istream-p
+              (lambda (call)
+                (let ((pcall (make-server-proto-call
+                              :c-call (call-c-call call)
+                              :c-tag (call-c-tag call)
+                              :c-ops (call-c-ops call)
+                              :ops-plist (call-ops-plist call)
+                              :server-stream-p ostream-p
+                              :client-stream-p istream-p
+                              :input-type (proto:proto-input-type method)
+                              :output-type (proto:proto-output-type method)
+                              :is-server-call (call-is-server-call call)
+                              :context (call-context call)
+                              :initial-metadata-sent-p (call-initial-metadata-sent-p call))))
+                  (funcall (proto:proto-server-stub method) pcall)))
+              (lambda (message call)
+                (let ((pcall (make-server-proto-call
+                              :c-call (call-c-call call)
+                              :c-tag (call-c-tag call)
+                              :c-ops (call-c-ops call)
+                              :ops-plist (call-ops-plist call)
+                              :server-stream-p ostream-p
+                              :client-stream-p istream-p
+                              :input-type (proto:proto-input-type method)
+                              :output-type (proto:proto-output-type method)
+                              :is-server-call (call-is-server-call call)
+                              :context (call-context call)
+                              :initial-metadata-sent-p (call-initial-metadata-sent-p call))))
+                  (funcall (proto:proto-server-stub method) message pcall))))
+          :input-streaming-p istream-p
+          :output-streaming-p ostream-p)
+         method-details-list)))
     (run-grpc-server address method-details-list
                      :server-creds server-creds
                      :cq cq
                      :num-threads num-threads
                      :dispatch-requests dispatch-requests)))
 
-(cl:export '(run-grpc-proto-server))
+(cl:export '(run-grpc-proto-server stream-send stream-receive stream-close
+             stream-cleanup do-stream-receive grpc-server-abort abort-server-stream))

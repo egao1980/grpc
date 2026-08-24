@@ -9,10 +9,12 @@
 #include <string.h>
 
 #include <cstddef>
+#include <cstdint>
 
 #include <grpc/byte_buffer.h>
 #include <grpc/grpc.h>
 #include <grpc/impl/grpc_types.h>
+#include <grpc/impl/propagation_bits.h>
 #include <grpc/impl/slice_type.h>
 #include <grpc/slice.h>
 #include <grpc/status.h>
@@ -30,11 +32,19 @@ extern "C" {
 // grpc_completion_queue_pluck or grpc_completion_queue_next is called.
 grpc_call* lisp_grpc_channel_create_call(grpc_channel* channel,
                                          const char* call_name,
-                                         grpc_completion_queue* cq) {
-  return grpc_channel_create_call(
-      channel, nullptr, GRPC_PROPAGATE_DEFAULTS, cq,
-      grpc_slice_from_copied_string(call_name), nullptr,
-      gpr_inf_future(GPR_CLOCK_MONOTONIC), nullptr);
+                                         grpc_completion_queue* cq,
+                                         double timeout) {
+  gpr_timespec deadline;
+  if (timeout < 0) {
+    deadline = gpr_inf_future(GPR_CLOCK_MONOTONIC);
+  } else {
+    deadline = gpr_time_add(
+        gpr_now(GPR_CLOCK_MONOTONIC),
+        gpr_time_from_micros((int64_t)(timeout * 1000000), GPR_TIMESPAN));
+  }
+  return grpc_channel_create_call(channel, nullptr, GRPC_PROPAGATE_DEFAULTS, cq,
+                                  grpc_slice_from_copied_string(call_name),
+                                  nullptr, deadline, nullptr);
 }
 
 // Prepares ops for completion queue pluck/next
@@ -63,6 +73,15 @@ void* new_tag(int num) {
   return new int(num);
 }
 
+grpc_metadata_array* create_new_grpc_metadata_array_with_data(
+    grpc_metadata* metadata, size_t count) {
+  grpc_metadata_array* arr = new grpc_metadata_array();
+  grpc_metadata_array_init(arr);
+  arr->count = count;
+  if (count > 0) arr->metadata = metadata;
+  return arr;
+}
+
 grpc_metadata_array* create_new_grpc_metadata_array() {
   grpc_metadata_array* arr = new grpc_metadata_array();
   grpc_metadata_array_init(arr);
@@ -85,7 +104,7 @@ void grpc_ops_free(grpc_op* ops, int size) {
   int i = 0;
   for (i = 0; i < size; i++) {
     if (ops[i].op == GRPC_OP_SEND_INITIAL_METADATA) {
-      delete ops[i].data.send_initial_metadata.metadata;
+      delete[] ops[i].data.send_initial_metadata.metadata;
     }
     if (ops[i].op == GRPC_OP_SEND_MESSAGE) {
       grpc_byte_buffer_destroy(ops[i].data.send_message.send_message);
@@ -94,28 +113,60 @@ void grpc_ops_free(grpc_op* ops, int size) {
       delete ops[i].data.recv_message.recv_message;
     }
     if (ops[i].op == GRPC_OP_RECV_STATUS_ON_CLIENT) {
-      grpc_metadata_array_destroy(ops[i].data.recv_status_on_client.
-                                  trailing_metadata);
+      grpc_metadata_array_destroy(
+          ops[i].data.recv_status_on_client.trailing_metadata);
+      delete ops[i].data.recv_status_on_client.status;
+      delete ops[i].data.recv_status_on_client.status_details;
     }
-    delete ops[i].data.recv_status_on_client.status;
-    delete ops[i].data.recv_status_on_client.status_details;
     if (ops[i].op == GRPC_OP_RECV_INITIAL_METADATA) {
-      grpc_metadata_array_destroy(ops[i].data.recv_initial_metadata
-                                      .recv_initial_metadata);
-
-    }
-    if (ops[i].op == GRPC_OP_SEND_INITIAL_METADATA) {
-      free(ops[i].data.send_initial_metadata.metadata);
+      grpc_metadata_array_destroy(
+          ops[i].data.recv_initial_metadata.recv_initial_metadata);
     }
     if (ops[i].op == GRPC_OP_SEND_STATUS_FROM_SERVER) {
-      delete ops[i].data.send_status_from_server.trailing_metadata;
+      delete[] ops[i].data.send_status_from_server.trailing_metadata;
     }
     if (ops[i].op == GRPC_OP_RECV_CLOSE_ON_SERVER) {
       free(ops[i].data.recv_close_on_server.cancelled);
     }
-
   }
   free(ops);
+}
+
+grpc_metadata* lisp_make_metadata_array(size_t count) {
+  return new grpc_metadata[count];
+}
+
+void lisp_metadata_array_set(grpc_metadata* array, size_t index,
+                             const char* key, const char* value) {
+  array[index].key = grpc_slice_from_copied_string(key);
+  array[index].value = grpc_slice_from_copied_string(value);
+  memset(&array[index].internal_data, 0, sizeof(array[index].internal_data));
+}
+
+const char* lisp_metadata_array_get_key(grpc_metadata_array* arr,
+                                        size_t index) {
+  return grpc_slice_to_c_string(arr->metadata[index].key);
+}
+
+const char* lisp_metadata_array_get_value(grpc_metadata_array* arr,
+                                          size_t index) {
+  return grpc_slice_to_c_string(arr->metadata[index].value);
+}
+
+size_t lisp_metadata_array_get_count(grpc_metadata_array* arr) {
+  return arr->count;
+}
+
+grpc_metadata* lisp_make_grpc_metadata(const char* key, const char* value) {
+  grpc_slice slice_key = grpc_slice_from_copied_string(key);
+  grpc_slice slice_value = grpc_slice_from_copied_string(value);
+
+  grpc_metadata* metadata = new grpc_metadata;
+  *metadata = grpc_metadata{
+      slice_key,
+      slice_value,
+  };
+  return metadata;
 }
 
 // Takes in a preallocated grpc_op array.
@@ -237,6 +288,8 @@ void lisp_grpc_server_make_close_op(grpc_op* op, int index, int* cancelled,
   op[index].reserved = nullptr;
 }
 
+grpc_slice* convert_string_to_grpc_slice(const char* str);
+
 // Takes in a preallocated grpc_op array.
 // Stores the given metadata, flags, and count for the
 // GRPC_OP_SEND_STATUS_FROM_SERVER operation.
@@ -251,6 +304,7 @@ void lisp_grpc_make_send_status_from_server_op(grpc_op* op,
   op[index].data.send_status_from_server.trailing_metadata_count =
       metadata_count;
   op[index].data.send_status_from_server.status = status;
+  op[index].data.send_status_from_server.status_details = nullptr;
   op[index].flags = flags;
   op[index].reserved = nullptr;
 }

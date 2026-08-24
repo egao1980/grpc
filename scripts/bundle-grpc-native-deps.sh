@@ -46,20 +46,41 @@ bundle_linux() {
     add_seen "$current"
 
     while IFS= read -r line; do
+      # "libfoo.so.1 => /path/libfoo.so.1 (0x...)": $1 is the soname the
+      # dynamic linker looks up (bundle under this name), $3 is the file.
+      soname=$(printf '%s' "$line" | awk '$2 == "=>" { print $1; exit }')
       dep=$(printf '%s' "$line" | awk '$2 == "=>" { print $3; exit }')
-      [ -z "$dep" ] || [ "$dep" = "not" ] && continue
+      [ -n "$soname" ] && [ -n "$dep" ] && [ "$dep" != "not" ] || continue
       [ -f "$dep" ] || continue
       dreal=$(real_path "$dep")
       brewish "$dreal" || continue
-      base=$(basename "$dreal")
-      [ -f "$destdir/$base" ] || cp -f "$dreal" "$destdir/$base"
-      seen_line "$dreal" || printf '%s\n' "$dreal" >>"$queue"
+      if [ ! -f "$destdir/$soname" ]; then
+        cp -f "$dreal" "$destdir/$soname"
+        chmod 644 "$destdir/$soname"
+      fi
+      seen_line "$destdir/$soname" || printf '%s\n' "$destdir/$soname" >>"$queue"
     done < <(ldd "$current" 2>/dev/null || true)
   done
+
+  # Brewish libs resolve siblings via their own RUNPATH ($ORIGIN first);
+  # ensure the main lib also searches its own directory.
+  if command -v patchelf >/dev/null 2>&1; then
+    patchelf --force-rpath --set-rpath '$ORIGIN' "$destdir/$(basename "$main_lib")"
+  fi
 }
 
+# Print resolved deps of $1 as "REFNAME|REALPATH" pairs.
+# REFNAME is the name used in the load command (what dyld looks up, and
+# therefore the filename we must bundle under); REALPATH is the file on disk.
+# @rpath/NAME entries are resolved against the real directory of the
+# referencing lib and the brew lib dir (brew libs reference siblings
+# like libupb_*.dylib and libgpr.dylib via @rpath).
 darwin_otool_deps() {
   local lib=$1
+  local libdir
+  libdir=$(dirname "$(real_path "$lib")")
+  local brew_lib=""
+  command -v brew >/dev/null 2>&1 && brew_lib="$(brew --prefix)/lib"
   local first=1
   while IFS= read -r line; do
     line=${line#"${line%%[![:space:]]*}"}
@@ -70,12 +91,18 @@ darwin_otool_deps() {
     fi
     dep=${line%%[[:space:]]*}
     case $dep in
-      @*) continue ;;
-      /*) ;;
-      *) continue ;;
+      @rpath/*)
+        base=${dep#@rpath/}
+        for dir in "$libdir" "$brew_lib"; do
+          [ -n "$dir" ] && [ -f "$dir/$base" ] || continue
+          printf '%s|%s\n' "$base" "$(real_path "$dir/$base")"
+          break
+        done
+        ;;
+      @*) ;;
+      /*) [ -f "$dep" ] && printf '%s|%s\n' "$(basename "$dep")" "$(real_path "$dep")" ;;
+      *) ;;
     esac
-    [ -f "$dep" ] || continue
-    real_path "$dep"
   done < <(otool -L "$lib" 2>/dev/null || true)
 }
 
@@ -87,51 +114,44 @@ bundle_darwin() {
     seen_line "$current" && continue
     add_seen "$current"
 
-    while IFS= read -r dreal; do
-      [ -n "$dreal" ] || continue
+    while IFS='|' read -r refname dreal; do
+      [ -n "$refname" ] && [ -n "$dreal" ] || continue
       brewish "$dreal" || continue
-      base=$(basename "$dreal")
-      [ -f "$destdir/$base" ] || cp -f "$dreal" "$destdir/$base"
-      seen_line "$dreal" || printf '%s\n' "$dreal" >>"$queue"
+      if [ ! -f "$destdir/$refname" ]; then
+        cp -f "$dreal" "$destdir/$refname"
+        chmod 644 "$destdir/$refname"   # Cellar files are 444; install_name_tool needs write
+      fi
+      seen_line "$destdir/$refname" || printf '%s\n' "$destdir/$refname" >>"$queue"
     done < <(darwin_otool_deps "$current")
   done
 
-  bundled_list=$(mktemp)
-  # shellcheck disable=SC2064
-  trap 'rm -f "$seen" "$queue" "$bundled_list"' EXIT
-
   for f in "$destdir"/*.dylib; do
     [ -f "$f" ] || continue
-    basename "$f"
-  done | sort -u >"$bundled_list"
-
-  for f in "$destdir"/*.dylib; do
-    [ -f "$f" ] || continue
-    base=$(basename "$f")
-    install_name_tool -id "@loader_path/$base" "$f" 2>/dev/null || true
+    install_name_tool -id "@loader_path/$(basename "$f")" "$f"
   done
 
-  for f in "$destdir"/*.dylib; do
+  # Rewrite load commands: any dep bundled under its referenced name now
+  # resolves via @loader_path in the same directory.
+  for f in "$destdir"/*; do
     [ -f "$f" ] || continue
     while IFS= read -r line; do
       line=${line#"${line%%[![:space:]]*}"}
       [ -z "$line" ] && continue
       old=${line%%[[:space:]]*}
       case $old in
+        @rpath/*) b=${old#@rpath/} ;;
         @*) continue ;;
-        /*) ;;
+        /*) brewish "$old" || continue; b=$(basename "$old") ;;
         *) continue ;;
       esac
-      brewish "$old" || continue
-      b=$(basename "$old")
-      grep -Fxq "$b" "$bundled_list" 2>/dev/null || continue
+      [ -f "$destdir/$b" ] || continue
       new="@loader_path/$b"
       [ "$old" = "$new" ] || install_name_tool -change "$old" "$new" "$f"
     done < <(otool -L "$f" 2>/dev/null | tail -n +2)
+    # install_name_tool invalidates the ad-hoc signature; arm64 kills
+    # binaries with broken signatures at dlopen time.
+    codesign --force -s - "$f" 2>/dev/null || true
   done
-
-  rm -f "$bundled_list"
-  trap 'rm -f "$seen" "$queue"' EXIT
 }
 
 case $(uname -s) in

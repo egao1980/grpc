@@ -51,11 +51,12 @@ the server and a single response is returned."
                              (channel
                               service-method-name
                               bytes-to-send
+                              client-context
                               server-stream
                               client-stream)
                              ;; No need to allocate extra memory for a channel that won't be used
                              ;; since we're mocking the underlying call.
-                             (declare (ignore channel))
+                             (declare (ignore channel client-context))
                              (assert-true (string= service-method-name qualified-method-name))
                              (assert-equalp bytes-to-send
                                             (cl-protobufs:serialize-to-bytes request))
@@ -84,11 +85,12 @@ the server and a stream of responses are returned."
                              (channel
                               service-method-name
                               bytes-to-send
+                              client-context
                               server-stream
                               client-stream)
                              ;; No need to allocate extra memory for a channel that won't be used
                              ;; since we're mocking the underlying call.
-                             (declare (ignore channel))
+                             (declare (ignore channel client-context))
                              (assert-true (string= service-method-name qualified-method-name))
                              (assert-equalp bytes-to-send
                                             (cl-protobufs:serialize-to-bytes request))
@@ -118,11 +120,12 @@ sent to the server and a single response is returned."
                              (channel
                               service-method-name
                               bytes-to-send
+                              client-context
                               server-stream
                               client-stream)
                              ;; No need to allocate extra memory for a channel that won't be used
                              ;; since we're mocking the underlying call.
-                             (declare (ignore channel))
+                             (declare (ignore channel client-context))
                              (assert-true (string= service-method-name qualified-method-name))
                              (assert-equalp bytes-to-send
                                             (mapcar #'cl-protobufs:serialize-to-bytes request))
@@ -155,11 +158,12 @@ sent to the server and a stream of responses are returned."
                              (channel
                               service-method-name
                               bytes-to-send
+                              client-context
                               server-stream
                               client-stream)
                              ;; No need to allocate extra memory for a channel that won't be used
                              ;; since we're mocking the underlying call.
-                             (declare (ignore channel))
+                             (declare (ignore channel client-context))
                              (assert-true (string= service-method-name qualified-method-name))
                              (assert-equalp bytes-to-send
                                             (mapcar #'cl-protobufs:serialize-to-bytes request))

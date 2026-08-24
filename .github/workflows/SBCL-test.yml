@@ -14,7 +14,7 @@ jobs:
 
     steps:
       - name: Download sbcl
-        run: sudo apt install sbcl
+        run: sudo apt-get update && sudo apt-get install -y sbcl
 
       - name: Download quicklisp
         run: curl -o quicklisp.lisp 'https://beta.quicklisp.org/quicklisp.lisp'
@@ -25,30 +25,31 @@ jobs:
           sbcl --noinform --non-interactive --load "$GITHUB_WORKSPACE/quicklisp/setup.lisp" --eval '(ql-util:without-prompting (ql:add-to-init-file))'
 
       - name: Download repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           path: quicklisp/local-projects/grpc
 
       - name: Install cmake & required tooling
         run: |
-          sudo apt install -y cmake
-          sudo apt install -y build-essential autoconf libtool pkg-config
+          sudo apt-get install -y cmake build-essential autoconf libtool pkg-config
 
+      # Pin C++ gRPC: HEAD drifts and trips Check failed: grpc_cq_begin_op
+      # (qitab/grpc pins v1.81.1 for the same reason).
       - name: Clone gRPC Github repo
-        run: git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/grpc/grpc
+        run: git clone --recurse-submodules --depth 1 --shallow-submodules --branch v1.81.1 https://github.com/grpc/grpc
 
       - name: Build and install gRPC c++
         run: |
           cd grpc &&
-          mkdir cmake/build &&
+          mkdir -p cmake/build &&
           pushd cmake/build &&
           cmake -DgRPC_INSTALL=ON -DgRPC_BUILD_TESTS=OFF -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX=/usr/local/ ../.. &&
-          make -j20 &&
-          sudo make install -j20 &&
+          make -j$(nproc) &&
+          sudo make install -j$(nproc) &&
           sudo ldconfig &&
           export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH &&
           cd $GITHUB_WORKSPACE/quicklisp/local-projects/grpc &&
-          sudo make -j20 &&
+          sudo make -j$(nproc) &&
           popd
 
       - name: Install protoc plug-in
@@ -57,10 +58,23 @@ jobs:
           git clone https://github.com/qitab/cl-protobufs
           cd cl-protobufs/protoc
           cmake . -DCMAKE_CXX_STANDARD=17
-          cmake --build . --target install --parallel 16
+          cmake --build . --target install --parallel $(nproc)
 
-      - name: Start gRPC
+      - name: Load and run tests
         run: |
           export PATH="$PATH:$GITHUB_WORKSPACE/quicklisp/local-projects/cl-protobufs/protoc/"
-          sbcl --noinform --non-interactive --eval '(ql:quickload :grpc)' --eval '(ql:quickload :clunit2)' --eval '(ql:quickload :flexi-streams)' --eval '(ql:quickload :bordeaux-threads)' --eval '(setf clunit:*clunit-report-format* :tap)' --eval '(asdf:test-system :grpc)' >> report
+          sbcl --noinform --non-interactive \
+            --load "$GITHUB_WORKSPACE/quicklisp/setup.lisp" \
+            --eval '(ql:quickload :grpc)' \
+            --eval '(ql:quickload :clunit2)' \
+            --eval '(ql:quickload :flexi-streams)' \
+            --eval '(ql:quickload :bordeaux-threads)' \
+            --eval '(setf clunit:*clunit-report-format* :tap)' \
+            --eval '(asdf:test-system :grpc)' >> report
+          test -f report
           cat report
+          if grep -q "not ok" report; then
+            echo "Test failure detected in report!"
+            exit 1
+          fi
+          grep -q "ok" report
