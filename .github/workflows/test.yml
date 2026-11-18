@@ -38,7 +38,7 @@ jobs:
 
       - name: Set up Homebrew (Linux)
         if: runner.os == 'Linux'
-        uses: Homebrew/actions/setup-homebrew@master
+        uses: Homebrew/actions/setup-homebrew@main
 
       - name: Install gRPC dev libraries (Linux)
         if: runner.os == 'Linux'
