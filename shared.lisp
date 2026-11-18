@@ -580,10 +580,6 @@ want. Returns a plist containing keys being the op type and values being the ind
 
 ;; Conversion, deletion functions
 
-;; Hack since :size defctype doesn't work in
-;; cffi:foreign-funcall externally
-(cffi:defctype :size #+64-bit :uint64 #+32-bit :uint32)
-
 (defun convert-bytes-to-grpc-slice (bytes)
   "Takes a list of bytes BYTES and returns a pointer to the corresponding
 grpc_slice*."
