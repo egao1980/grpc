@@ -1,0 +1,86 @@
+name: Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: grpc-test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SBCL_VERSION: 2.6.7
+  ROSWELL_VERSION: "26.02.116"
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-amd64
+            lib: grpc.so
+          - os: macos-latest
+            platform: darwin-arm64
+            lib: grpc.dylib
+
+    runs-on: ${{ matrix.os }}
+    # A hung client/server test must fail the job, not hold a runner for hours.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Homebrew (Linux)
+        if: runner.os == 'Linux'
+        uses: Homebrew/actions/setup-homebrew@main
+
+      - name: Install gRPC dev libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y build-essential pkg-config patchelf
+          brew install grpc
+
+      - name: Install gRPC dev libraries (macOS)
+        if: runner.os == 'macOS'
+        run: brew install grpc pkg-config
+
+      # Build against Homebrew gRPC, then bundle grpc.so + its gRPC runtime into
+      # lib/<os>-<arch>/ the way publish-oci.yml builds the overlay. The brew
+      # search paths are for this step only: the tests load the bundle by
+      # absolute path (asdf-native), never through LD_LIBRARY_PATH.
+      - name: Build and bundle the native wrapper
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            BREW_PREFIX=/home/linuxbrew/.linuxbrew
+            export PATH="$BREW_PREFIX/bin:$PATH"
+            export PKG_CONFIG_PATH="$BREW_PREFIX/lib/pkgconfig:$BREW_PREFIX/share/pkgconfig"
+            export CPATH="$BREW_PREFIX/include" LIBRARY_PATH="$BREW_PREFIX/lib" LD_LIBRARY_PATH="$BREW_PREFIX/lib"
+          fi
+          make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+          chmod +x scripts/bundle-grpc-native-deps.sh
+          ./scripts/bundle-grpc-native-deps.sh "${{ matrix.lib }}" "lib/${{ matrix.platform }}"
+          make clean
+          ls -la "lib/${{ matrix.platform }}"
+
+      - uses: egao1980/cl-repository/.github/actions/setup-lisp@main
+        with:
+          sbcl-version: ${{ env.SBCL_VERSION }}
+          roswell-version: ${{ env.ROSWELL_VERSION }}
+
+      - uses: egao1980/cl-repository/.github/actions/ci@main
+        with:
+          phase: install
+          system: grpc
+
+      - uses: egao1980/cl-repository/.github/actions/ci@main
+        with:
+          phase: test
+          system: grpc

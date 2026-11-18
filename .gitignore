@@ -3,3 +3,5 @@
 *.dylib
 /lib/
 /native-bundle/
+cl-repo.lock
+.cl-repository/

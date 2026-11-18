@@ -135,7 +135,7 @@ cat > "${TMPDIR_PULL}/publish.lisp" <<'LISP'
                :description "Common Lisp gRPC client/server library (CFFI wrapper)"
                :depends-on '("cl-protobufs" "cffi" "bordeaux-threads")
                :provides '("grpc")
-               :cffi-libraries '("grpc-client-wrapper")
+               :cffi-libraries '("grpc-wrapper")
                :overlays
                (flet ((make-overlay (os arch)
                         (let* ((lib-dir (merge-pathnames
