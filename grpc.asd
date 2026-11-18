@@ -5,7 +5,7 @@
 
 (defsystem :grpc
   :author "Jonathan Godbout <jgodbout@google.com>"
-  :version (:read-file-form "version.sexp")
+  :version "0.9.1"
   :description "Lisp wrapper for gRPC"
   :license "MIT"
   :defsystem-depends-on ("asdf-native")
