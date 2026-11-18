@@ -29,6 +29,8 @@ jobs:
             lib: grpc.dylib
 
     runs-on: ${{ matrix.os }}
+    # A hung client/server test must fail the job, not hold a runner for hours.
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read
