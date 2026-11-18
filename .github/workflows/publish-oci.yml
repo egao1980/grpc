@@ -124,7 +124,6 @@ jobs:
         client.lisp
         server.lisp
         shared.lisp
-        libraries.lisp
         protobuf-integration.lisp
         client.cc
         server.cc

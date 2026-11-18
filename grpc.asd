@@ -8,29 +8,21 @@
   :version (:read-file-form "version.sexp")
   :description "Lisp wrapper for gRPC"
   :license "MIT"
+  :defsystem-depends-on ("asdf-native")
   :depends-on (:cl-protobufs :cffi :bordeaux-threads)
-  ;; NOTE: minimal overlay spec for local package-op builds.  The CI publish
-  ;; pipeline (.github/workflows/publish-oci.yml) builds the authoritative
-  ;; overlays dynamically -- native/ additionally carries the gRPC runtime
-  ;; libraries bundled next to grpc.so by scripts/bundle-grpc-native-deps.sh.
-  :properties (:cl-repo (:cffi-libraries ("grpc-client-wrapper")
-                          :provides ("grpc")
-                          :overlays ((:platform (:os "linux" :arch "amd64")
-                                      :layers ((:role "native-library"
-                                                :files (("lib/linux-amd64/grpc.so"
-                                                         . "grpc.so")))))
-                                     (:platform (:os "linux" :arch "arm64")
-                                      :layers ((:role "native-library"
-                                                :files (("lib/linux-arm64/grpc.so"
-                                                         . "grpc.so")))))
-                                     (:platform (:os "darwin" :arch "arm64")
-                                      :layers ((:role "native-library"
-                                                :files (("lib/darwin-arm64/grpc.dylib"
-                                                         . "grpc.dylib"))))))))
+  ;; Overlays: lib/<os>-<arch>/ per platform, from the :native-library component.
+  ;; publish-oci.yml fills it with grpc.so plus the gRPC runtime that
+  ;; scripts/bundle-grpc-native-deps.sh bundles next to it.
+  :properties (:cl-repo (:provides ("grpc")))
   :serial t
   :in-order-to ((test-op (test-op :grpc/tests)))
   :components ((:file "grpc")
-               (:file "libraries")
+               ;; $GRPC_NATIVE, native/ (overlay), lib/<os>-<arch>/ (bundled
+               ;; checkout build), then the system root (a plain `make`).
+               (:native-library "grpc-wrapper"
+                :names (:darwin ("grpc.dylib") :unix ("grpc.so"))
+                :env "GRPC_NATIVE"
+                :fallback-directories (""))
                (:file "shared")
                (:file "client")
                (:file "server")
