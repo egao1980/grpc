@@ -9,7 +9,7 @@
   :description "Lisp wrapper for gRPC"
   :license "MIT"
   :defsystem-depends-on ("asdf-native")
-  :depends-on ((:version :cl-protobufs "2.0.1") :cffi :bordeaux-threads)
+  :depends-on ((:version :cl-protobufs "2.0.2") :cffi :bordeaux-threads)
   ;; Overlays: lib/<os>-<arch>/ per platform, from the :native-library component.
   ;; publish-oci.yml fills it with grpc.so plus the gRPC runtime that
   ;; scripts/bundle-grpc-native-deps.sh bundles next to it.
